@@ -14,6 +14,8 @@ def main():
 
     merged = []
     for manifest in args.manifests:
+        if (manifest.parent / "errors.csv").exists():
+            raise ValueError(f"Resolve construction errors before merging: {manifest}")
         with manifest.open("r", newline="", encoding="utf-8-sig") as handle:
             for row in csv.DictReader(handle):
                 graph_path = Path(row["pt_path"])
@@ -24,6 +26,9 @@ def main():
     if not merged:
         raise RuntimeError("no manifest rows were found")
 
+    keys = [(r["dataset"], r["subject_id"]) for r in merged]
+    if len(keys) != len(set(keys)):
+        raise ValueError("Duplicate dataset/subject_id in merged manifest")
     fieldnames = []
     for row in merged:
         for key in row:

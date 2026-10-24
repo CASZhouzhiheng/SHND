@@ -1,73 +1,55 @@
 from __future__ import annotations
-
 import torch
 import torch.nn.functional as F
 
 
-def _topk_contrastive_loss(
-    embeddings: torch.Tensor,
-    positive_mask: torch.Tensor,
-    negative_mask: torch.Tensor,
-    anchor_weights: torch.Tensor | None,
-    temperature: float,
-    top_k: int,
-) -> torch.Tensor:
-    normalized = F.normalize(embeddings, p=2, dim=-1)
-    similarities = normalized @ normalized.T
-    losses = []
-    for anchor in range(normalized.size(0)):
-        positive = torch.where(positive_mask[anchor])[0]
-        negative = torch.where(negative_mask[anchor])[0]
-        if positive.numel() == 0 or negative.numel() == 0:
-            continue
-        positive_scores = similarities[anchor, positive]
-        negative_scores = similarities[anchor, negative]
-        if positive.numel() > top_k:
-            positive = positive[torch.topk(positive_scores, top_k, largest=False).indices]
-        if negative.numel() > top_k:
-            negative = negative[torch.topk(negative_scores, top_k, largest=True).indices]
-        candidates = torch.cat([positive, negative])
-        denominator = torch.logsumexp(similarities[anchor, candidates] / temperature, dim=0)
-        loss = -(similarities[anchor, positive] / temperature - denominator).mean()
+def contrastive_loss(embeddings, positive_mask, negative_mask, anchor_weights,
+                     temperature, top_k=3):
+    if temperature <= 0 or top_k < 0:
+        raise ValueError("temperature must be positive; top_k=0 means all candidates")
+    normalized = F.normalize(embeddings, dim=-1)
+    similarity = normalized @ normalized.T / temperature
+    total = embeddings.sum() * 0
+    for i in range(len(embeddings)):
+        positive = positive_mask[i].nonzero(as_tuple=True)[0]
+        negative = negative_mask[i].nonzero(as_tuple=True)[0]
+        if positive.numel() == 0:
+            continue  
+        if top_k:
+            if positive.numel() > top_k:
+                positive = positive[torch.randperm(len(positive), device=positive.device)[:top_k]]
+            if negative.numel() > top_k:
+                negative = negative[torch.randperm(len(negative), device=negative.device)[:top_k]]
+        candidates = torch.cat((positive, negative))
+        loss = torch.logsumexp(similarity[i, candidates], dim=0)-similarity[i, positive].mean()
         if anchor_weights is not None:
-            loss = loss * anchor_weights[anchor].detach()
-        losses.append(loss)
-    return torch.stack(losses).mean() if losses else embeddings.sum() * 0.0
+            loss = loss * anchor_weights[i]
+        total = total + loss
+    return total / max(1, len(embeddings))
 
 
-def dual_contrastive_losses(outputs, labels, tau_f: float, tau_g: float, gamma: float, top_k: int):
-    probabilities = torch.softmax(outputs["logits"].detach(), dim=-1)
-    predictions = probabilities.argmax(dim=-1)
-    reliability = torch.sigmoid(outputs["reliability_logits"].detach())
+def contrastive_masks(labels, predictions, reliability, gamma):
+    other = ~torch.eye(len(labels), dtype=torch.bool, device=labels.device)
+    same = labels[:, None].eq(labels[None, :])
     correct = predictions.eq(labels)
-    not_self = ~torch.eye(labels.numel(), dtype=torch.bool, device=labels.device)
+    pf = same & correct[None, :] & other
+    nf = predictions[None, :].eq(labels[:, None]) & ~same & other
+    close = (reliability[:, None]-reliability[None, :]).abs() < gamma
+    pg = same & close & other
+    ng = (~same | ~close) & other
+    return pf, nf, pg, ng
 
-    cscl_positive = labels[:, None].eq(labels[None, :]) & correct[None, :] & not_self
-    cscl_negative = (
-        predictions[None, :].eq(labels[:, None])
-        & labels[None, :].ne(labels[:, None])
-        & not_self
-    )
-    cscl_weights = probabilities.max(dim=-1).values * reliability
-    cscl = _topk_contrastive_loss(
-        outputs["predictive_embedding"],
-        cscl_positive,
-        cscl_negative,
-        cscl_weights,
-        tau_f,
-        top_k,
-    )
 
-    reliability_gap = (reliability[:, None] - reliability[None, :]).abs()
-    rcl_positive = labels[:, None].eq(labels[None, :]) & (reliability_gap < gamma) & not_self
-    rcl_negative = (labels[:, None].ne(labels[None, :]) | (reliability_gap >= gamma)) & not_self
-    rcl = _topk_contrastive_loss(
-        outputs["rejection_embedding"],
-        rcl_positive,
-        rcl_negative,
-        None,
-        tau_g,
-        top_k,
-    )
-    return cscl, rcl
-
+def dual_contrastive_losses(outputs, labels, tau_f=0.2, tau_g=0.2, gamma=0.1,
+                            top_k=3, detach_confidence=False):
+    if gamma <= 0:
+        raise ValueError("gamma must be positive")
+    probabilities = outputs["logits"].softmax(-1)
+    reliability = outputs["reliability_logits"].sigmoid()
+    pf, nf, pg, ng = contrastive_masks(labels, probabilities.detach().argmax(-1),
+                                      reliability.detach(), gamma)
+    weights = probabilities.max(-1).values * reliability
+    if detach_confidence:
+        weights = weights.detach()
+    return (contrastive_loss(outputs["predictive_embedding"], pf, nf, weights, tau_f, top_k),
+            contrastive_loss(outputs["rejection_embedding"], pg, ng, None, tau_g, top_k))

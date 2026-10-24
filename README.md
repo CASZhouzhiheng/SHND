@@ -1,186 +1,272 @@
 # SHND
 
-Official-style research code for **Selective Hypergraph Neural Diffusion (SHND)** on resting-state fMRI hypergraphs.
+**Selective Hypergraph Neural Diffusion for Reliable Brain Disorder Diagnosis from fMRI**
 
-SHND combines an adaptive hypergraph neural diffusion encoder, a predictive head, and a hypergraph-aware rejection head. The repository includes MTD-based hypergraph construction, single-dataset and cross-dataset training, selective-risk evaluation, ablation settings, and subject-level hyperedge-attention export.
+SHND learns disease predictions and prediction reliability from subject-specific resting-state fMRI hypergraphs. It combines higher-order functional interaction modeling, adaptive hypergraph diffusion, and dual contrastive learning to support selective diagnosis: the model predicts on accepted subjects and abstains on subjects with lower reliability scores.
 
-> Raw neuroimaging data, generated hypergraphs, checkpoints, and experimental outputs are intentionally not included.
+## Overview
 
-## Repository layout
+The framework consists of four components:
+
+1. **Hypergraph construction.** Normalized temporal derivatives of ROI signals define node features. Pairwise and three-ROI interactions are evaluated using signed co-fluctuation statistics and temporal permutation tests.
+2. **Hypergraph neural diffusion.** A learnable incidence-level modulation operator controls information propagation between nodes and hyperedges.
+3. **Prediction and rejection.** A predictive head estimates disease probabilities, while a hypergraph-aware rejection head estimates prediction reliability.
+4. **Dual contrastive learning.** Confidence-aware supervised contrastive learning (CSCL) shapes predictive representations, and reliability-aware contrastive learning (RCL) shapes rejection representations.
+
+The training objective is
+
+$$
+\mathcal{L}=\mathcal{L}_{\mathrm{cls}}+\lambda_c\mathcal{L}_{\mathrm{conf}}+\lambda_f\mathcal{L}_{\mathrm{CSCL}}+\lambda_g\mathcal{L}_{\mathrm{RCL}}.
+$$
+
+During warm-up, only classification and confidence-estimation losses are optimized. The two contrastive objectives are activated afterward.
+
+## Repository Structure
 
 ```text
-SHND-GitHub/
-  src/shnd/
-    construction.py       # MTD permutation testing and edge completion
-    incidence.py          # Matrix-free G_H and G_H^T operators
-    model.py              # Adaptive HND encoder and dual heads
-    losses.py             # CSCL and RCL objectives
-    data.py               # Manifest datasets and data splits
-    metrics.py            # Coverage-risk evaluation
-    engine.py             # Training and checkpoint selection
-  scripts/
-    00_merge_manifests.py
-    01_build_hypergraphs.py
-    02_train_shnd.py
-    03_export_attention.py
-    04_smoke_test.py
-  configs/example_commands.md
-  data/README.md
-  tests/test_model.py
-  requirements.txt
-  pyproject.toml
+SHND/
+├── src/shnd/
+│   ├── construction.py       # Signed co-fluctuation statistics and permutation tests
+│   ├── incidence.py          # Hypergraph gradient and adjoint operators
+│   ├── model.py              # Diffusion encoder, predictive head, and rejection head
+│   ├── losses.py             # CSCL and RCL objectives
+│   ├── data.py               # Graph datasets, manifests, and stratified splits
+│   ├── engine.py             # Training, checkpoint selection, and evaluation
+│   ├── experiment.py         # Experiment orchestration and staged parameter search
+│   └── metrics.py            # Coverage-dependent selective risk
+├── scripts/
+│   ├── 00_merge_manifests.py
+│   ├── 01_build_hypergraphs.py
+│   ├── 02_train_shnd.py
+│   ├── 03_export_attention.py
+│   └── 04_smoke_test.py
+├── configs/
+│   └── paper_search.json
+├── tests/
+│   └── test_paper_alignment.py
+├── data/
+│   └── README.md
+├── requirements.txt
+├── pyproject.toml
+└── LICENSE
 ```
 
-## Environment
+## Installation
 
-Python 3.10 or newer and PyTorch 2.0 or newer are recommended.
+Requirements: Python 3.10 or later, PyTorch 2.0 or later, and NumPy 1.24 or later.
+
+Run the following commands from the repository root:
 
 ```bash
 python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Linux/macOS: source .venv/bin/activate
+# Linux/macOS:
+source .venv/bin/activate
+# Windows PowerShell:
+# .venv\Scripts\Activate.ps1
+
 pip install -r requirements.txt
 pip install -e .
 ```
 
-Run the code-only smoke test:
+For GPU execution, install a PyTorch build compatible with your CUDA environment. Both CPU and CUDA execution are supported through `--device`.
+
+Run the test suite:
 
 ```bash
 python scripts/04_smoke_test.py
 ```
 
-## Expected raw-data layout
+The tests cover interaction statistics, diffusion operators, contrastive objectives, data splits, and synthetic training. No external dataset is required.
 
-Each dataset uses the same binary-group organization. Files may be whitespace-delimited text, CSV, or TSV matrices. The expected orientation is time points by ROIs; ROI-by-time matrices are automatically transposed when unambiguous.
+## Data Preparation
+
+The construction pipeline expects **preprocessed ROI time series**. Image preprocessing and atlas-based ROI extraction should be completed before running these scripts.
+
+Organize each dataset as follows:
 
 ```text
 data/raw/ABIDE_I/
-  control/timeseries/<subject files>
-  patient/timeseries/<subject files>
-data/raw/ABIDE_II/
-  control/timeseries/<subject files>
-  patient/timeseries/<subject files>
+├── control/
+│   └── timeseries/
+│       ├── subject_001.txt
+│       └── ...
+└── patient/
+    └── timeseries/
+        ├── subject_002.txt
+        └── ...
 ```
 
-The first 90 columns are retained when an AAL116 time series is supplied. See [data/README.md](data/README.md) for the processed graph format.
+Each file should contain a time-by-ROI matrix. The default configuration uses 90 non-cerebellar AAL ROIs in a consistent order across subjects. Whitespace-delimited text, CSV, and TSV files are supported. Include only ROI signal columns; remove subject identifiers and time-index columns from the matrix. File stems serve as subject identifiers and must be unique within each dataset.
 
-## 1. Construct subject-level hypergraphs
+Labels are assigned as `control = 0` and `patient = 1`. Raw data, processed subject graphs, and trained checkpoints are not included in the repository.
 
-The construction script computes first-order temporal derivatives, tests all second- and third-order MTD candidates using permutation tests, retains edges with `p < 0.1`, adds the three lowest-p incident candidates for any isolated ROI, fills the graph in ascending p-value order when fewer than 6,000 edges remain, and caps the graph at 12,000 edges.
+## Hypergraph Construction
+
+For each subject, the pipeline:
+
+1. Computes first-order temporal derivatives and divides each ROI derivative sequence by its temporal standard deviation.
+2. Enumerates all two-node and three-node candidate hyperedges.
+3. Standardizes the temporal product of the normalized derivatives and applies a sign-consistency gate. Mixed-sign interactions are assigned zero at the corresponding time point.
+4. Computes interaction strength as the mean absolute signed co-fluctuation.
+5. Independently permutes each ROI sequence to construct the null distribution and retains hyperedges with empirical `p < 0.05`.
+
+The default number of permutations is 10,000.
 
 ```bash
-python scripts/01_build_hypergraphs.py \
-  --dataset ABIDE_I \
-  --input-root data/raw/ABIDE_I \
-  --output-root data/processed/ABIDE_I \
-  --num-rois 90 \
-  --target-time 128 \
-  --permutations 500 \
-  --alpha 0.1 \
-  --fallback-per-isolate 3 \
-  --min-edges 6000 \
-  --max-edges 12000 \
-  --device cuda
+python scripts/01_build_hypergraphs.py --dataset ABIDE_I --input-root data/raw/ABIDE_I --output-root data/processed/ABIDE_I --num-rois 90 --permutations 10000 --alpha 0.05 --device cuda
 ```
 
-Repeat the command for each cohort, then merge the generated manifests while safely rebasing their graph paths:
+Use `--device cpu` for CPU execution. Reduce `--edge-batch-size` or `--permutation-chunk` to lower memory usage; their defaults are 256 and 16, respectively.
+
+The pipeline preserves the full node-feature sequence by default. Training requires a common feature width. If recordings have different lengths, explicitly select a common length using `--target-time`, for example:
 
 ```bash
-python scripts/00_merge_manifests.py \
-  --manifests \
-    data/processed/ABIDE_I/manifest.csv \
-    data/processed/ABIDE_II/manifest.csv \
-    data/processed/ADHD200/manifest.csv \
-    data/processed/MDD/manifest.csv \
-    data/processed/ADNI/manifest.csv \
-  --output data/processed/all_datasets_manifest.csv
+python scripts/01_build_hypergraphs.py --dataset ABIDE_I --input-root data/raw/ABIDE_I --output-root data/processed/ABIDE_I_T128 --target-time 128 --device cuda
 ```
 
-## 2. Train and evaluate SHND
+This option truncates or zero-pads node features to the requested length. Hyperedge statistics are still computed from the complete derivative sequences. Apply the same feature-length convention to source and target cohorts in cross-dataset experiments.
 
-Single-dataset experiments use a stratified `7:1:2` train/validation/test split. Checkpoint selection is performed on validation selective risk, never on the test set. The default coverage levels are `{10, 30, 50, 70, 75, 80, 85, 90, 95, 99}%`.
+Each graph stores node features, retained hyperedges, empirical p-values, signed co-fluctuation sequences, interaction strengths, and construction metadata. A `manifest.csv` indexes the generated graphs. Construction failures are recorded in `errors.csv` and must be resolved before training or merging manifests. Graphs with no significant hyperedges raise an error. Use a fresh construction output directory for each run.
+
+### Merge Dataset Manifests
+
+Construct each dataset separately, then merge the manifests for multi-cohort experiments:
 
 ```bash
-python scripts/02_train_shnd.py \
-  --manifest data/processed/all_datasets_manifest.csv \
-  --dataset ABIDE_I \
-  --feature x_derivative \
-  --methods sr shnd \
-  --seeds 2024 2025 2026 2027 2028 \
-  --hidden-dim 64 \
-  --layers 3 \
-  --epochs 150 \
-  --warmup-epochs 50 \
-  --batch-size 16 \
-  --lambda-c 0.5 \
-  --lambda-f 0.05 \
-  --lambda-g 0.05 \
-  --tau-f 0.2 \
-  --tau-g 0.2 \
-  --gamma 0.1 \
-  --contrastive-k 3 \
-  --output-dir outputs/shnd
+python scripts/00_merge_manifests.py --manifests data/processed/ABIDE_I/manifest.csv data/processed/ABIDE_II/manifest.csv --output data/processed/all_datasets.csv
 ```
 
-Available methods are:
+The merger rebases graph paths and checks for duplicate dataset–subject identifiers.
 
-- `sr`: softmax response with the shared diffusion backbone
-- `shnd`: complete model
-- `wo_cscl`: without classification-space contrastive learning
-- `wo_rcl`: without rejection-space contrastive learning
-- `wo_dual_cl`: without both contrastive objectives
-- `wo_warmup`: starts all objectives at epoch 1
-- `pairwise_only`: removes hyperedges containing more than two ROIs
-- `uniform_readout`: replaces learned rejection readout weights with uniform weights
+## Training and Evaluation
 
-### Cross-dataset evaluation
+### Within-Dataset Evaluation
 
-Train on ABIDE-I and evaluate directly on ABIDE-II:
+Within-dataset experiments use stratified tenfold cross-validation. All methods share the same folds for a given seed. One fold is held out for testing, and a stratified validation subset is drawn from the remaining nine folds. The default validation fraction is `1/9` of the development set and can be changed with `--validation-fraction`.
 
 ```bash
-python scripts/02_train_shnd.py \
-  --manifest data/processed/all_datasets_manifest.csv \
-  --train-dataset ABIDE_I \
-  --test-dataset ABIDE_II \
-  --feature x_derivative \
-  --methods sr shnd \
-  --seeds 2024 2025 2026 2027 2028
+python scripts/02_train_shnd.py --manifest data/processed/ABIDE_I/manifest.csv --dataset ABIDE_I --methods shnd sr --output-dir outputs/tenfold
 ```
 
-## 3. Export rejection-head hyperedge attention
+Staged validation-set search is enabled by default. Each outer fold performs its own parameter search, followed by final training with the selected configuration. Test subjects are excluded from parameter and checkpoint selection.
 
-The exporter saves the reliability score, prediction, hyperedge membership, and normalized rejection-head attention coefficient `beta` for every subject-hyperedge pair.
+### Training Defaults
+
+| Setting | Default |
+|---|---|
+| Optimizer | AdamW |
+| Learning rate | `5e-4` |
+| Batch size | `64` |
+| Training epochs | `150` |
+| Warm-up epochs | `50` |
+| Hidden dimension | `64` before search |
+| Diffusion layers | `3` before search |
+| Reliability-loss weight, `lambda_c` | `0.5` before search |
+| Contrastive-loss weights, `lambda_f`, `lambda_g` | `0.05`, `0.05` before search |
+| Temperatures, `tau_f`, `tau_g` | `0.2`, `0.2` before search |
+| Reliability margin, `gamma` | `0.1` before search |
+| Weight decay | `1e-4` before search |
+| Contrastive sampling | Up to 3 positives and 3 negatives per anchor |
+| Validation frequency | Every epoch |
+| Checkpoint selection | Mean selective risk over the evaluated coverage levels |
+| Random seed | `2024` |
+
+Contrastive candidates are constructed within the current mini-batch. Sampling is uniform without replacement; smaller candidate sets use all available members. Anchors without positive candidates contribute zero while remaining in the batch-average denominator. Set `--contrastive-k 0` to use all candidates. Confidence weights are differentiable by default; `--detach-confidence` enables stop-gradient weighting.
+
+### Hyperparameter Search
+
+The default search configuration is defined in `configs/paper_search.json`:
+
+| Stage | Parameters | Candidate values |
+|---|---|---|
+| 1 | Hidden dimension; diffusion depth | `{16, 32, 64}`; `{2, 3}` |
+| 2 | Weight decay | `{0, 1e-4, 1e-3}` |
+| 3 | `lambda_c` | `{0.1, 0.5, 1, 2}` |
+| 4 | `lambda_f`; `lambda_g` | `{0.01, 0.05, 0.1}` each |
+| 5 | `tau_f`; `tau_g` | `{0.1, 0.2, 0.5}` each |
+| 6 | `gamma` | `{0.05, 0.1, 0.2}` |
+
+Parameters selected at earlier stages are carried forward. Full SHND search uses 34 trials per fold, followed by one final training run. Use `--search-config path/to/config.json` to supply another staged search configuration.
+
+To train with fixed hyperparameters, pass `--skip-search`:
 
 ```bash
-python scripts/03_export_attention.py \
-  --checkpoint outputs/shnd/ABIDE_I/x_derivative/shnd/seed_2024/best_model.pt \
-  --manifest data/processed/all_datasets_manifest.csv \
-  --dataset ABIDE_I \
-  --output outputs/attention/ABIDE_I_seed2024.csv
+python scripts/02_train_shnd.py --manifest data/processed/ABIDE_I/manifest.csv --dataset ABIDE_I --methods shnd --skip-search --hidden-dim 64 --layers 3 --lambda-c 0.5 --lambda-f 0.05 --lambda-g 0.05 --output-dir outputs/fixed_config
 ```
 
-These exported values can be used for rejected-vs-accepted, incorrect-vs-correct, and disease-related high-order interaction analyses.
+### Cross-Dataset Evaluation
 
-## Model overview
+Use the source cohort for training and validation, and the full target cohort for independent testing:
 
-For node features `X` with shape `|V| x T`, SHND first obtains `Z^(0) = ReLU(X W)`. Incidence-level compatibility scores between nodes and their incident hyperedges are normalized over the hyperedges attached to each node. The encoder then performs adaptive hypergraph diffusion without explicitly materializing a dense incidence matrix. Mean node pooling feeds the predictive head, while an attention-weighted hyperedge readout feeds the rejection head.
+```bash
+python scripts/02_train_shnd.py --manifest data/processed/all_datasets.csv --train-dataset ABIDE_I --test-dataset ABIDE_II --methods shnd sr --output-dir outputs/transfer
+```
 
-The training objective is
+The source cohort is split into training and validation sets at a stratified ratio of 7:1. Hyperparameter selection uses only source validation data. Source and target node-feature dimensions must match.
+
+### Methods and Ablations
+
+| CLI name | Description |
+|---|---|
+| `shnd` | Full model with both contrastive objectives |
+| `sr` | Diffusion encoder and predictive head trained with classification loss; MSP-based selection |
+| `wo_cscl` | Without CSCL |
+| `wo_rcl` | Without RCL |
+| `wo_dual_cl` | Without either contrastive objective |
+| `wo_warmup` | Activates all objectives from the first epoch |
+| `pairwise_only` | Uses only retained two-node hyperedges |
+| `uniform_readout` | Uses uniform hyperedge weights in the rejection readout |
+
+Specify multiple methods after `--methods` to evaluate them on shared splits.
+
+## Selective-Risk Metrics
+
+Subjects are ranked by descending reliability score. SR uses maximum softmax probability (MSP). Evaluation reports classification error among accepted subjects at coverage levels:
 
 ```text
-L = L_CE + lambda_c L_rejection + lambda_f L_CSCL + lambda_g L_RCL.
+10%, 30%, 50%, 70%, 75%, 80%, 85%, 90%, 95%, 100%
 ```
 
-During warm-up, only `L_CE` and `L_rejection` are optimized. CSCL and RCL are enabled after the warm-up period.
+Selective risk is reported as a **percentage**. The accepted-sample count is rounded upward, and output files include the realized coverage and accepted count. At 100% coverage, all subjects are evaluated.
 
-## Reproducibility notes
+SHND also exports MSP-ranked results using the same trained model and predictions. This differs from the separately trained `sr` baseline. SHND and its MSP-ranked evaluation therefore have identical risk at 100% coverage.
 
-- Generated `.pt` graphs retain the original hyperedge list and edge-level permutation p-values.
-- Model checkpoints contain both architecture and training configurations.
-- All reported selective risks rank subjects from high to low reliability. SR uses maximum softmax probability; SHND uses the rejection-head output.
-- Hyperparameter selection should be completed using the validation split only.
-- Acquisition-site information should be retained as metadata and not used as an input feature unless explicitly studying site-aware models.
+## Experiment Outputs
+
+Runs are organized as:
+
+```text
+<output-dir>/<task>/<feature>/<method>/seed_<seed>/fold_<fold>/
+```
+
+Each final run includes:
+
+| File | Contents |
+|---|---|
+| `split.csv` | Training, validation, and test subject assignments |
+| `selected_config.json` | Selected training configuration |
+| `training_history.csv` | Training losses and validation metrics |
+| `validation_selection.json` | Best epoch and validation selection score |
+| `best_model.pt` | Selected model checkpoint and configuration |
+| `predictions.csv` | Subject-level predictions, probabilities, and selection scores |
+| `coverage_risk.csv` | Selective risk, realized coverage, and accepted counts |
+| `predictions_msp.csv` | SHND predictions with MSP selection scores |
+| `coverage_risk_msp.csv` | MSP-ranked evaluation of the SHND model |
+
+The last two files are generated for `shnd`. Search records are stored under `search/`, including `search_trace.json` and per-trial results. Task-level raw results and summaries are written to the output root. Within-dataset summaries report fold-wise means and population standard deviations (`ddof=0`) for each seed. Use a fresh output directory to avoid mixing experiments.
+
+## Export Hyperedge Attention
+
+Export rejection-head hyperedge attention for held-out test subjects using a saved fold assignment:
+
+```bash
+python scripts/03_export_attention.py --checkpoint outputs/fixed_config/ABIDE_I/x_derivative/shnd/seed_2024/fold_01/best_model.pt --manifest outputs/fixed_config/ABIDE_I/x_derivative/shnd/seed_2024/fold_01/split.csv --output outputs/attention/fold01_test.csv
+```
+
+The exporter uses `--split test` by default. Each row contains the subject identifier, diagnostic label, prediction, reliability score, hyperedge membership, and normalized rejection-readout weight `beta`. Both zero-based and one-based ROI indices are exported.
+
+Repeat this procedure for all folds to obtain out-of-fold attention results. For inference on an ordinary graph manifest, explicitly use `--split all`. SR has no rejection head and does not support rejection-attention export.
 
 ## License
 
-This code is released under the MIT License. Dataset access and redistribution remain subject to the terms of the original data providers.
+This project is distributed under the MIT License. See [LICENSE](LICENSE) for details. Dataset access and redistribution are governed by the terms of the respective data providers.

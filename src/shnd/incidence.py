@@ -8,8 +8,6 @@ import torch
 
 @dataclass(frozen=True)
 class IncidenceOperator:
-    """Matrix-free implementation of the normalized hypergraph gradient."""
-
     node_ids: torch.Tensor
     edge_ids: torch.Tensor
     inverse_sqrt_node_degree: torch.Tensor
@@ -28,16 +26,14 @@ class IncidenceOperator:
         nodes: list[int] = []
         edges: list[int] = []
         for edge_id, edge in enumerate(edge_list):
-            clean = sorted({int(node) for node in edge if 0 <= int(node) < num_nodes})
-            if len(clean) < 2:
-                continue
+            clean = sorted({int(node) for node in edge})
+            if len(clean) < 2 or len(clean) != len(edge) or any(v < 0 or v >= num_nodes for v in clean):
+                raise ValueError("Invalid hyperedge membership: require distinct in-range nodes and cardinality >=2")
             nodes.extend(clean)
             edges.extend([edge_id] * len(clean))
 
-        # Keep the operator well-defined for an empty hypergraph.
         if not nodes:
-            nodes = list(range(num_nodes))
-            edges = list(range(num_nodes))
+            raise ValueError("No retained hyperedges: paper does not define empty-graph rejection readout")
 
         node_ids = torch.tensor(nodes, dtype=torch.long, device=device)
         original_edge_ids = torch.tensor(edges, dtype=torch.long, device=device)

@@ -12,11 +12,13 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from shnd.construction import (  # noqa: E402
+from shnd.construction import ( 
     finalize_edges,
     make_features,
     test_candidate_edges,
-    zscore_columns,
+    normalized_derivatives,
+    signed_cofluctuation,
+    GRAPH_SCHEMA,
 )
 
 
@@ -27,13 +29,10 @@ def read_timeseries(path: Path, num_rois: int) -> np.ndarray:
         array = array[None, :]
     array = array[~np.all(~np.isfinite(array), axis=1)]
     array = array[:, ~np.all(~np.isfinite(array), axis=0)]
-    if array.shape[1] == num_rois + 1:
-        array = array[:, 1:]
     if array.shape[0] == num_rois and array.shape[1] != num_rois:
         array = array.T
-    if array.shape[1] < num_rois:
-        raise ValueError(f"{path}: expected at least {num_rois} ROI columns, got {array.shape}")
-    array = array[:, :num_rois]
+    if array.shape[1] != num_rois:
+        raise ValueError(f"{path}: expected exactly {num_rois} ordered ROI columns, got {array.shape}; remove index columns and select AAL90 explicitly")
     if array.shape[0] < 3 or not np.isfinite(array).all():
         raise ValueError(f"{path}: invalid or too-short time series with shape {array.shape}")
     return array
@@ -54,19 +53,18 @@ def main():
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--patterns", nargs="+", default=["*.txt", "*.csv", "*.tsv"])
     parser.add_argument("--num-rois", type=int, default=90)
-    parser.add_argument("--target-time", type=int, default=128)
-    parser.add_argument("--permutations", type=int, default=500)
-    parser.add_argument("--alpha", type=float, default=0.1)
-    parser.add_argument("--edge-batch-size", type=int, default=4096)
-    parser.add_argument("--permutation-chunk", type=int, default=128)
-    parser.add_argument("--fallback-per-isolate", type=int, default=3)
-    parser.add_argument("--min-edges", type=int, default=6000)
-    parser.add_argument("--max-edges", type=int, default=12000)
+    parser.add_argument("--target-time", type=int, default=None, help="Optional feature truncation/zero padding; NOT specified by paper")
+    parser.add_argument("--permutations", type=int, default=10000)
+    parser.add_argument("--alpha", type=float, default=0.05)
+    parser.add_argument("--edge-batch-size", type=int, default=256)
+    parser.add_argument("--permutation-chunk", type=int, default=16)
     parser.add_argument("--seed", type=int, default=2024)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--limit-per-group", type=int)
     args = parser.parse_args()
 
+    if (args.output_root / "manifest.csv").exists() or (args.output_root / "errors.csv").exists():
+        parser.error("Use a fresh output directory to avoid mixing old and new construction results")
     args.output_root.mkdir(parents=True, exist_ok=True)
     manifest_path = args.output_root / "manifest.csv"
     errors_path = args.output_root / "errors.csv"
@@ -83,7 +81,7 @@ def main():
             try:
                 raw = read_timeseries(path, args.num_rois)
                 derivative_features, raw_features = make_features(raw, args.target_time)
-                derivatives = zscore_columns(np.diff(raw, axis=0))
+                derivatives = normalized_derivatives(raw)
                 significant = {}
                 tested = []
                 for order in (2, 3):
@@ -94,7 +92,7 @@ def main():
                         alpha=args.alpha,
                         edge_batch_size=args.edge_batch_size,
                         permutation_chunk=args.permutation_chunk,
-                        seed=args.seed + 2 * subject_index + order,
+                        seed=args.seed + subject_index,
                         device=args.device,
                     )
                     significant.update(selected_order)
@@ -104,17 +102,29 @@ def main():
                     significant,
                     tested,
                     num_nodes=args.num_rois,
-                    fallback_per_isolate=args.fallback_per_isolate,
-                    min_edges=args.min_edges,
-                    max_edges=args.max_edges,
                 )
                 edge_list = [edge for edge, _ in finalized]
                 p_values = [p_value for _, p_value in finalized]
+                if not edge_list:
+                    raise ValueError("No significant edges; paper does not define this case. No synthetic edges added.")
+                edge_w = torch.empty((len(edge_list), len(derivatives)), dtype=torch.float32)
+                q = torch.from_numpy(derivatives)
+                for cardinality in (2, 3):
+                    ids = [i for i, e in enumerate(edge_list) if len(e) == cardinality]
+                    for start in range(0, len(ids), args.edge_batch_size):
+                        chunk = ids[start:start+args.edge_batch_size]
+                        edge_w[chunk] = signed_cofluctuation(q, torch.tensor([edge_list[i] for i in chunk]))
                 subject_id = path.stem
                 graph_path = args.output_root / "graphs" / group / f"{subject_id}.pt"
                 graph_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(
                     {
+                        "schema": GRAPH_SCHEMA,
+                        "construction": {"permutations": args.permutations, "alpha": args.alpha,
+                                         "target_time": args.target_time, "seed": args.seed+subject_index,
+                                         "std_ddof": 0, "max_interaction_order": 2},
+                        "edge_w": edge_w,
+                        "edge_strength": edge_w.abs().mean(-1),
                         "x_derivative": torch.from_numpy(derivative_features),
                         "x_raw_zscore": torch.from_numpy(raw_features),
                         "edge_list": edge_list,
@@ -169,6 +179,8 @@ def main():
             writer.writeheader()
             writer.writerows(error_rows)
     print(f"saved {len(manifest_rows)} graphs to {args.output_root}")
+    if error_rows or not manifest_rows:
+        raise SystemExit("Construction incomplete: inspect errors.csv; partial cohorts must not be silently trained")
 
 
 if __name__ == "__main__":

@@ -23,32 +23,43 @@ def truncate_or_pad(features: np.ndarray, target_time: int) -> np.ndarray:
     return output
 
 
-def make_features(time_by_roi: np.ndarray, target_time: int):
+def normalized_derivatives(time_by_roi):
+    raw = np.asarray(time_by_roi, dtype=np.float32)
+    if raw.ndim != 2 or raw.shape[0] < 3 or not np.isfinite(raw).all():
+        raise ValueError("Expected finite T-by-ROI data, at least three time points")
+    dx = np.diff(raw, axis=0)
+    std = dx.std(axis=0, keepdims=True)
+    return np.divide(dx, std, out=np.zeros_like(dx), where=std > 1e-8)
+
+
+def make_features(time_by_roi, target_time=None):
     raw = zscore_columns(time_by_roi).T
-    derivative = zscore_columns(np.diff(time_by_roi, axis=0)).T
+    derivative = normalized_derivatives(time_by_roi).T
+    if target_time is None:
+        return derivative, raw
+    if target_time < 1:
+        raise ValueError("target_time must be positive")
     return truncate_or_pad(derivative, target_time), truncate_or_pad(raw, target_time)
 
 
-def _strength(values: torch.Tensor) -> torch.Tensor:
-    mean = values.mean(dim=-1, keepdim=True)
-    std = values.std(dim=-1, unbiased=False, keepdim=True)
-    normalized = torch.where(std > 1e-8, (values - mean) / std.clamp_min(1e-8), 0.0)
-    return normalized.abs().mean(dim=-1)
+def signed_cofluctuation(q, edges):
+    components = q[..., edges].movedim(-3, -1)
+    product = components.prod(dim=-2)
+    std = product.std(dim=-1, unbiased=False, keepdim=True)
+    xi = (product-product.mean(dim=-1, keepdim=True)) / std.clamp_min(1e-8)
+    xi = torch.where(std > 1e-8, xi, 0.0)
+    pos = (components >= 0).all(dim=-2)
+    neg = (components <= 0).all(dim=-2)
+    sign = torch.where(pos, 1.0, torch.where(neg, -1.0, 0.0))
+    return sign * xi.abs()
 
 
-def _observed_strength(derivatives: torch.Tensor, edges: torch.Tensor):
-    values = derivatives[:, edges[:, 0]].T * derivatives[:, edges[:, 1]].T
-    if edges.size(1) == 3:
-        values = values * derivatives[:, edges[:, 2]].T
-    return _strength(values)
+def _observed_strength(derivatives, edges):
+    return signed_cofluctuation(derivatives, edges).abs().mean(dim=-1)
 
 
-def _null_strength(permuted: torch.Tensor, edges: torch.Tensor):
-    values = permuted[:, :, edges[:, 0]].permute(0, 2, 1)
-    values = values * permuted[:, :, edges[:, 1]].permute(0, 2, 1)
-    if edges.size(1) == 3:
-        values = values * permuted[:, :, edges[:, 2]].permute(0, 2, 1)
-    return _strength(values)
+def _null_strength(permuted, edges):
+    return _observed_strength(permuted, edges)
 
 
 def test_candidate_edges(
@@ -61,7 +72,13 @@ def test_candidate_edges(
     seed: int,
     device: str,
 ):
+    if order not in (2, 3) or min(permutations, edge_batch_size, permutation_chunk) < 1:
+        raise ValueError("Use cardinality 2 or 3 and positive permutation/batch counts")
+    if not 0 < alpha < 1:
+        raise ValueError("alpha must lie in (0,1)")
     values = torch.as_tensor(derivatives, dtype=torch.float32, device=device)
+    if values.ndim != 2 or values.shape[0] < 2 or not torch.isfinite(values).all():
+        raise ValueError("derivatives must be finite time-by-node data")
     num_time, num_nodes = values.shape
     candidates = itertools.combinations(range(num_nodes), order)
     generator = torch.Generator(device=device).manual_seed(seed)
@@ -73,17 +90,18 @@ def test_candidate_edges(
         edges = torch.tensor(batch, dtype=torch.long, device=device)
         observed = _observed_strength(values, edges)
         exceedances = torch.zeros(edges.size(0), dtype=torch.int32, device=device)
+        generator = torch.Generator(device=device).manual_seed(seed)
         completed = 0
         while completed < permutations:
             current = min(permutation_chunk, permutations - completed)
             random_values = torch.rand(
-                (current, num_time, num_nodes), generator=generator, device=device
+                (current, num_nodes, num_time), generator=generator, device=device
             )
-            indices = torch.argsort(random_values, dim=1)
+            indices = torch.argsort(random_values, dim=-1).transpose(1, 2)
             shuffled = torch.gather(values.unsqueeze(0).expand(current, -1, -1), 1, indices)
             exceedances += (_null_strength(shuffled, edges) >= observed.unsqueeze(0)).sum(0)
             completed += current
-        p_values = (1 + exceedances.float()) / (permutations + 1)
+        p_values = (1 + exceedances.double()) / (permutations + 1)
         for edge, p_value in zip(edges.cpu().tolist(), p_values.cpu().tolist()):
             tested.append((tuple(edge), float(p_value)))
     tested.sort(key=lambda item: (item[1], len(item[0]), item[0]))
@@ -91,68 +109,5 @@ def test_candidate_edges(
     return significant, tested
 
 
-def finalize_edges(
-    significant: dict,
-    tested: list[tuple[tuple[int, ...], float]],
-    num_nodes: int,
-    fallback_per_isolate: int = 3,
-    min_edges: int = 6000,
-    max_edges: int = 12000,
-):
-    selected = dict(significant)
-
-    def degrees():
-        degree = np.zeros(num_nodes, dtype=np.int64)
-        for edge in selected:
-            np.add.at(degree, np.asarray(edge), 1)
-        return degree
-
-    degree = degrees()
-    for node in np.flatnonzero(degree == 0):
-        incident = [(edge, p) for edge, p in tested if node in edge and edge not in selected]
-        for edge, p_value in incident[:fallback_per_isolate]:
-            selected[edge] = p_value
-        degree = degrees()
-
-    for edge, p_value in tested:
-        if len(selected) >= min_edges:
-            break
-        selected.setdefault(edge, p_value)
-
-    ordered = sorted(selected.items(), key=lambda item: (item[1], len(item[0]), item[0]))
-    if max_edges <= 0 or len(ordered) <= max_edges:
-        return ordered
-
-    kept = dict(ordered[:max_edges])
-
-    def kept_degrees():
-        degree = np.zeros(num_nodes, dtype=np.int64)
-        for edge in kept:
-            np.add.at(degree, np.asarray(edge), 1)
-        return degree
-
-    degree = kept_degrees()
-    isolated = set(np.flatnonzero(degree == 0).tolist())
-    for edge, p_value in ordered[max_edges:]:
-        if isolated.intersection(edge):
-            kept[edge] = p_value
-            degree = kept_degrees()
-            isolated = set(np.flatnonzero(degree == 0).tolist())
-            if not isolated:
-                break
-
-    while len(kept) > max_edges:
-        removable = None
-        for edge, p_value in sorted(
-            kept.items(), key=lambda item: (item[1], len(item[0]), item[0]), reverse=True
-        ):
-            trial = degree.copy()
-            np.add.at(trial, np.asarray(edge), -1)
-            if np.all(trial > 0):
-                removable = edge
-                degree = trial
-                break
-        if removable is None:
-            break
-        del kept[removable]
-    return sorted(kept.items(), key=lambda item: (item[1], len(item[0]), item[0]))
+def finalize_edges(significant, tested=None, num_nodes=None):
+    return sorted(significant.items(), key=lambda item: (item[1], len(item[0]), item[0]))

@@ -11,8 +11,8 @@ from torch.utils.data import DataLoader
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from shnd.data import HypergraphDataset, collate_graphs, read_manifest  # noqa: E402
-from shnd.model import SHNDModel  # noqa: E402
+from shnd.data import HypergraphDataset, collate_graphs, read_manifest
+from shnd.model import SHNDModel 
 
 
 def main():
@@ -20,18 +20,27 @@ def main():
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--dataset")
+    parser.add_argument("--split", choices=["train", "validation", "test", "all"], default="test")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    if checkpoint.get("schema") != "shnd-paper-model-v1":
+        raise ValueError("Legacy checkpoint: retrain the paper-aligned model")
+    if checkpoint["method"] == "sr":
+        raise ValueError("SR has no rejection head to export")
     model = SHNDModel(**checkpoint["model_config"])
     model.load_state_dict(checkpoint["model_state"])
     model.to(args.device).eval()
     feature = checkpoint["training_config"]["feature"]
     rows = read_manifest(args.manifest, {args.dataset} if args.dataset else None)
+    if args.split != "all":
+        if any("split" not in row for row in rows):
+            raise ValueError("Use the saved fold split.csv for out-of-fold export, or explicitly pass --split all")
+        rows = [row for row in rows if row["split"] == args.split]
     loader = DataLoader(
-        HypergraphDataset(rows, feature), batch_size=1, collate_fn=collate_graphs
+        HypergraphDataset(rows, feature, checkpoint["method"] == "pairwise_only"), batch_size=1, collate_fn=collate_graphs
     )
 
     exported = []
@@ -57,6 +66,8 @@ def main():
                         "prediction": int(probabilities.argmax().item()),
                     }
                 )
+    if not exported:
+        raise ValueError("No subject-hyperedge rows selected for export")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(exported[0]))

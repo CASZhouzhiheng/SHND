@@ -8,7 +8,6 @@ from .incidence import IncidenceOperator
 
 
 def grouped_softmax(scores: torch.Tensor, group_ids: torch.Tensor, num_groups: int) -> torch.Tensor:
-    """Apply softmax independently to entries sharing the same group id."""
 
     maxima = scores.new_full((num_groups,), -torch.inf)
     maxima.scatter_reduce_(0, group_ids, scores, reduce="amax", include_self=True)
@@ -21,14 +20,13 @@ def grouped_softmax(scores: torch.Tensor, group_ids: torch.Tensor, num_groups: i
 class AdaptiveHNDEncoder(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int = 64, num_layers: int = 3):
         super().__init__()
-        self.input_projection = nn.Linear(input_dim, hidden_dim)
+        self.input_projection = nn.Linear(input_dim, hidden_dim, bias=False)
         self.incidence_score = nn.Sequential(
             nn.Linear(2 * hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
         self.num_layers = num_layers
-        self.step_logits = nn.Parameter(torch.full((num_layers,), 0.2))
 
     def forward(
         self,
@@ -48,13 +46,11 @@ class AdaptiveHNDEncoder(nn.Module):
         z = z0
         for layer in range(self.num_layers):
             gradient = incidence.gradient(z)
-            step = torch.sigmoid(self.step_logits[layer])
-            z = z - step * incidence.divergence(incidence_attention.unsqueeze(-1) * gradient)
+            z = z - incidence.divergence(incidence_attention.unsqueeze(-1) * gradient)
         return z, incidence_attention, incidence
 
 
 class SHNDModel(nn.Module):
-    """Adaptive hypergraph diffusion with predictive and rejection heads."""
 
     def __init__(
         self,
@@ -63,6 +59,7 @@ class SHNDModel(nn.Module):
         num_layers: int = 3,
         num_classes: int = 2,
         uniform_rejection_readout: bool = False,
+        use_rejection_head: bool = True,
     ):
         super().__init__()
         self.config = {
@@ -71,10 +68,11 @@ class SHNDModel(nn.Module):
             "num_layers": num_layers,
             "num_classes": num_classes,
             "uniform_rejection_readout": uniform_rejection_readout,
+            "use_rejection_head": use_rejection_head,
         }
         self.encoder = AdaptiveHNDEncoder(input_dim, hidden_dim, num_layers)
-        self.predictive_head = nn.Linear(hidden_dim, num_classes)
-        self.rejection_head = nn.Linear(hidden_dim, 1)
+        self.predictive_head = nn.Linear(hidden_dim, num_classes, bias=False)
+        self.rejection_head = nn.Linear(hidden_dim, 1, bias=False) if use_rejection_head else None
         self.uniform_rejection_readout = uniform_rejection_readout
 
     @staticmethod
@@ -128,6 +126,10 @@ class SHNDModel(nn.Module):
         predictive_embedding.index_add_(0, graph_ids, node_embeddings)
         predictive_embedding /= torch.tensor(node_counts, device=device).unsqueeze(-1)
 
+        if self.rejection_head is None:
+            return {"logits": self.predictive_head(predictive_embedding),
+                    "predictive_embedding": predictive_embedding,
+                    "node_embeddings": node_embeddings, "incidence_attention": incidence_attention}
         edge_embeddings = incidence.edge_mean(node_embeddings)
         edge_attention_sum = node_embeddings.new_zeros(incidence.num_edges)
         edge_attention_sum.index_add_(0, incidence.edge_ids, incidence_attention)
