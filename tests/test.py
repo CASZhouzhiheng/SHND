@@ -208,9 +208,16 @@ class Tests(unittest.TestCase):
                     with (directory/"coverage_risk_msp.csv").open(encoding="utf-8-sig") as handle:
                         msp = list(csv.DictReader(handle))
                     self.assertEqual(float(msp[-1]["risk_pct"]), risks[100])
-            old = root/"old.pt"; torch.save(dict(x_derivative=torch.ones(4,5), edge_list=[(0,1)]), old)
-            with self.assertRaisesRegex(ValueError, "legacy graph"):
-                HypergraphDataset([dict(rows[0], pt_path=str(old))])[0]
+            invalid = root / "invalid.pt"
+            torch.save(
+                {
+                    "x_derivative": torch.full((4, 5), float("nan")),
+                    "edge_list": [(0, 1)],
+                },
+                invalid,
+            )
+            with self.assertRaisesRegex(ValueError, "invalid node features"):
+                HypergraphDataset([dict(rows[0], pt_path=str(invalid))])[0]
             chosen = staged_search(rows[:8], rows[8:10], cfg, "shnd", 7, root/"real_search",
                                    [{"hidden_dim": [4, 6]}])
             self.assertIn(chosen["hidden_dim"], [4, 6])

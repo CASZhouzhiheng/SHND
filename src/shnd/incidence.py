@@ -31,7 +31,8 @@ class IncidenceOperator:
                 raise ValueError("Invalid hyperedge membership: require distinct in-range nodes and cardinality >=2")
             nodes.extend(clean)
             edges.extend([edge_id] * len(clean))
-
+        if not nodes:
+            raise ValueError("No retained hyperedges")
         node_ids = torch.tensor(nodes, dtype=torch.long, device=device)
         original_edge_ids = torch.tensor(edges, dtype=torch.long, device=device)
         _, edge_ids = torch.unique(original_edge_ids, sorted=True, return_inverse=True)

@@ -66,7 +66,7 @@ def main():
     parser.add_argument("--gamma", type=float, default=0.1)
     parser.add_argument("--contrastive-k", type=int, default=3, help="0: full candidate-set formula")
     parser.add_argument("--detach-confidence", action="store_true", help="Alternative to differentiating Eq. (45)")
-    parser.add_argument("--gradient-clip", type=float, default=0")
+    parser.add_argument("--gradient-clip", type=float, default=0)
     parser.add_argument("--eval-every", type=int, default=1)
     parser.add_argument("--selection-metric", choices=["mean_risk", "lowcov", "risk95"], default="mean_risk")
     parser.add_argument("--validation-fraction", type=float, default=1/9)
