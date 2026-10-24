@@ -65,7 +65,6 @@ source .venv/bin/activate
 # .venv\Scripts\Activate.ps1
 
 pip install -r requirements.txt
-pip install -e .
 ```
 
 For GPU execution, install a PyTorch build compatible with your CUDA environment. Both CPU and CUDA execution are supported through `--device`.
