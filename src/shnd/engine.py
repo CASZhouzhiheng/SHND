@@ -228,7 +228,6 @@ def train_run(train_rows, val_rows, test_rows, config: dict, method: str, seed: 
             "training_config": config,
             "method": method,
             "seed": seed,
-            "schema": "shnd-paper-model-v1",
             "best_epoch": best_epoch,
             "validation_score": best_score,
         },

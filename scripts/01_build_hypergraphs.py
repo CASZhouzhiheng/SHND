@@ -18,7 +18,6 @@ from shnd.construction import (
     test_candidate_edges,
     normalized_derivatives,
     signed_cofluctuation,
-    GRAPH_SCHEMA,
 )
 
 
@@ -53,7 +52,7 @@ def main():
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--patterns", nargs="+", default=["*.txt", "*.csv", "*.tsv"])
     parser.add_argument("--num-rois", type=int, default=90)
-    parser.add_argument("--target-time", type=int, default=None, help="Optional feature truncation/zero padding; NOT specified by paper")
+    parser.add_argument("--target-time", type=int, default=None)
     parser.add_argument("--permutations", type=int, default=10000)
     parser.add_argument("--alpha", type=float, default=0.05)
     parser.add_argument("--edge-batch-size", type=int, default=256)
@@ -106,7 +105,7 @@ def main():
                 edge_list = [edge for edge, _ in finalized]
                 p_values = [p_value for _, p_value in finalized]
                 if not edge_list:
-                    raise ValueError("No significant edges; paper does not define this case. No synthetic edges added.")
+                    raise ValueError("No significant edges.")
                 edge_w = torch.empty((len(edge_list), len(derivatives)), dtype=torch.float32)
                 q = torch.from_numpy(derivatives)
                 for cardinality in (2, 3):
@@ -119,7 +118,6 @@ def main():
                 graph_path.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(
                     {
-                        "schema": GRAPH_SCHEMA,
                         "construction": {"permutations": args.permutations, "alpha": args.alpha,
                                          "target_time": args.target_time, "seed": args.seed+subject_index,
                                          "std_ddof": 0, "max_interaction_order": 2},

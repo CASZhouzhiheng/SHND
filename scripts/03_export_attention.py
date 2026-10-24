@@ -26,8 +26,6 @@ def main():
     args = parser.parse_args()
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    if checkpoint.get("schema") != "shnd-paper-model-v1":
-        raise ValueError("Legacy checkpoint: retrain the paper-aligned model")
     if checkpoint["method"] == "sr":
         raise ValueError("SR has no rejection head to export")
     model = SHNDModel(**checkpoint["model_config"])

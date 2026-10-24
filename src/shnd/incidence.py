@@ -32,9 +32,6 @@ class IncidenceOperator:
             nodes.extend(clean)
             edges.extend([edge_id] * len(clean))
 
-        if not nodes:
-            raise ValueError("No retained hyperedges: paper does not define empty-graph rejection readout")
-
         node_ids = torch.tensor(nodes, dtype=torch.long, device=device)
         original_edge_ids = torch.tensor(edges, dtype=torch.long, device=device)
         _, edge_ids = torch.unique(original_edge_ids, sorted=True, return_inverse=True)

@@ -8,7 +8,6 @@ import torch
 from torch.utils.data import Dataset
 
 from .incidence import IncidenceOperator
-from .construction import GRAPH_SCHEMA
 
 
 def read_manifest(path: str | Path, datasets: set[str] | None = None) -> list[dict]:
@@ -48,8 +47,6 @@ class HypergraphDataset(Dataset):
         cache_key = (row["pt_path"], self.pairwise_only)
         if cache_key not in self._cache:
             graph = torch.load(row["pt_path"], map_location="cpu", weights_only=False)
-            if graph.get("schema") != GRAPH_SCHEMA:
-                raise ValueError(f"{row['pt_path']}: legacy graph; rebuild using corrected Eqs. (8)-(17)")
             edge_list = [tuple(map(int, edge)) for edge in graph["edge_list"]]
             if self.pairwise_only:
                 edge_list = [edge for edge in edge_list if len(set(edge)) == 2]

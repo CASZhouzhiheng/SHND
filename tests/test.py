@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 import numpy as np
 import torch
-from shnd.construction import (GRAPH_SCHEMA, normalized_derivatives, signed_cofluctuation,
+from shnd.construction import (normalized_derivatives, signed_cofluctuation,
                                test_candidate_edges as permutation_test, finalize_edges, make_features)
 from shnd.data import stratified_tenfold, cross_dataset_split, HypergraphDataset
 from shnd.incidence import IncidenceOperator
@@ -23,7 +23,7 @@ from shnd.experiment import staged_search
 torch.set_num_threads(1)
 
 
-class PaperTests(unittest.TestCase):
+class Tests(unittest.TestCase):
     def test_derivative_not_centered(self):
         raw = np.array([[0, 0], [1, 1], [3, 4], [7, 6]], np.float32)
         expected = np.diff(raw, axis=0) / np.diff(raw, axis=0).std(axis=0)
@@ -191,7 +191,7 @@ class PaperTests(unittest.TestCase):
             root = Path(temp); rows = []
             for i in range(12):
                 path = root/f"g{i}.pt"
-                torch.save(dict(schema=GRAPH_SCHEMA, x_derivative=torch.randn(4, 5),
+                torch.save(dict(x_derivative=torch.randn(4, 5),
                                 edge_list=[(0, 1), (1, 2), (1, 2, 3)]), path)
                 rows.append(dict(pt_path=str(path), label=i%2, dataset="test", subject_id=str(i)))
             cfg = dict(feature="x_derivative", input_dim=5, hidden_dim=6, num_layers=2, num_classes=2,
@@ -203,7 +203,6 @@ class PaperTests(unittest.TestCase):
                 risks = train_run(rows[:8], rows[8:10], rows[10:], cfg, method, 7, directory)
                 self.assertTrue(all(math.isfinite(v) for v in risks.values()))
                 checkpoint = torch.load(directory/"best_model.pt", weights_only=False)
-                self.assertEqual(checkpoint["schema"], "shnd-paper-model-v1")
                 SHNDModel(**checkpoint["model_config"]).load_state_dict(checkpoint["model_state"])
                 if method == "shnd":
                     with (directory/"coverage_risk_msp.csv").open(encoding="utf-8-sig") as handle:

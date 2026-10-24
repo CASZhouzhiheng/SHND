@@ -41,7 +41,7 @@ def staged_search(train, validation, config, method, seed, directory, stages):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Paper-aligned SHND; tenfold by default.")
+    parser = argparse.ArgumentParser(description="SHND.")
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--dataset")
     parser.add_argument("--train-dataset")
@@ -66,11 +66,10 @@ def main():
     parser.add_argument("--gamma", type=float, default=0.1)
     parser.add_argument("--contrastive-k", type=int, default=3, help="0: full candidate-set formula")
     parser.add_argument("--detach-confidence", action="store_true", help="Alternative to differentiating Eq. (45)")
-    parser.add_argument("--gradient-clip", type=float, default=0, help="Disabled: not specified in paper")
+    parser.add_argument("--gradient-clip", type=float, default=0")
     parser.add_argument("--eval-every", type=int, default=1)
     parser.add_argument("--selection-metric", choices=["mean_risk", "lowcov", "risk95"], default="mean_risk")
-    parser.add_argument("--validation-fraction", type=float, default=1/9,
-                        help="Fraction of outer nine folds; not specified in paper")
+    parser.add_argument("--validation-fraction", type=float, default=1/9)
     parser.add_argument("--search-config", type=Path,
                         default=Path(__file__).resolve().parents[2]/"configs/paper_search.json")
     parser.add_argument("--skip-search", action="store_true", help="Fixed configuration experiment, not tuned replication")
